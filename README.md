@@ -50,29 +50,52 @@ npm install zod @nestjs/config
 
 ### 2. Criando o Módulo de Configuração
 
+#### Estruturando o Projeto
+
+Crie uma nova pasta `config` dentro de `src` e organize o módulo de configuração nela:
+
+```bash
+mkdir src/config
+```
+
 #### Esquema de Validação
 
-Utilize Zod para definir o esquema das variáveis de ambiente:
+Utilize Zod para definir o esquema das variáveis de ambiente em `src/config/config.schema.ts`:
 
 ```typescript
 import { z } from 'zod';
 
-export const configSchema = z.object({
-  env: z.enum(['development', 'production']),
-  port: z.coerce.number().positive().int(),
-  database: z.object({
-    host: z.string().min(1),
-    database: z.string().min(1),
-    username: z.string().min(1),
-    password: z.string().min(1),
-    port: z.coerce.number().positive().int(),
-  }),
+export const environmentSchema = z.enum(['development', 'production']);
+
+export const databaseSchema = z.object({
+  host: z.string().min(1),
+  database: z.string().min(1),
+  password: z.string().min(1),
+  port: z.coerce.number().min(1),
+  username: z.string().min(1),
 });
+
+export const configSchema = z.object({
+  env: environmentSchema,
+  port: z.coerce.number().positive().int(),
+  database: databaseSchema,
+});
+```
+
+#### Tipagem das Configurações
+
+Defina os tipos inferidos do esquema em `src/config/config.type.ts`:
+
+```typescript
+import { z } from 'zod';
+import { configSchema } from './config.schema';
+
+export type Config = z.infer<typeof configSchema>;
 ```
 
 #### Exceção Personalizada
 
-Para capturar erros:
+Crie uma exceção personalizada em `src/config/config.exception.ts` para capturar erros:
 
 ```typescript
 export class ConfigException extends Error {}
@@ -80,37 +103,141 @@ export class ConfigException extends Error {}
 
 #### Fábrica de Configuração
 
-Valide e carregue as configurações:
+Implemente a fábrica de configuração em `src/config/config.factory.ts` para validar e carregar as configurações:
 
 ```typescript
 import { configSchema } from './config.schema';
+import { Config } from './config.type';
 import { ConfigException } from './config.exception';
 
-export function configFactory() {
-  const result = configSchema.safeParse(process.env);
+export function configFactory(): Config {
+  const result = configSchema.safeParse({
+    env: process.env.NODE_ENV,
+    port: process.env.PORT,
+    database: {
+      host: process.env.DATABASE_HOST,
+      port: process.env.DATABASE_PORT,
+      username: process.env.DATABASE_USERNAME,
+      password: process.env.DATABASE_PASSWORD,
+      database: process.env.DATABASE_NAME,
+    },
+  });
 
   if (!result.success) {
-    throw new ConfigException(`Erro na configuração: ${result.error.message}`);
+    throw new ConfigException(
+      `Configuration file error: ${result.error.message}`,
+    );
   }
 
   return result.data;
 }
 ```
 
+#### Serviço de Configuração
+
+Crie um serviço para simplificar o acesso às configurações em `src/config/config.service.ts`:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { ConfigService as NestConfigService } from '@nestjs/config';
+import { Config } from './config.type';
+
+@Injectable()
+export class ConfigService {
+  constructor(private configService: NestConfigService) {}
+
+  get<K extends keyof Config>(key: K): Config[K] {
+    return this.configService.get(key, { infer: true }) as Config[K];
+  }
+}
+```
+
 #### Integração no Módulo
 
-Adicione o módulo ao projeto:
+Adicione o módulo ao projeto em `src/config/config.module.ts`:
 
 ```typescript
 import { ConfigModule as NestConfigModule } from '@nestjs/config';
 import { Module } from '@nestjs/common';
 import { configFactory } from './config.factory';
+import { ConfigService } from './config.service';
 
 @Module({
-  imports: [NestConfigModule.forRoot({ load: [configFactory] })],
-  exports: [NestConfigModule],
+  imports: [
+    NestConfigModule.forRoot({
+      load: [configFactory],
+    }),
+  ],
+  providers: [ConfigService],
+  exports: [ConfigService],
 })
 export class ConfigModule {}
+```
+
+### 3. Registrando no AppModule
+
+Adicione o `ConfigModule` ao `AppModule` para garantir que ele seja carregado corretamente. No arquivo `src/app.module.ts`:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { ConfigModule } from './config/config.module';
+
+@Module({
+  imports: [ConfigModule],
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+```
+
+### 4. Testando no Arquivo `main.ts`
+
+Para garantir que a validação está funcionando, teste diretamente no arquivo `src/main.ts`. Primeiro, execute sem criar o arquivo `.env` e observe os erros no console. Em seguida, crie o arquivo `.env` com valores adequados e valide se o console exibe os valores corretamente.
+
+#### Implementação do Teste
+
+Adicione o seguinte código ao `src/main.ts`:
+
+```typescript
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+import { ConfigService } from './config/config.service';
+import { Logger } from '@nestjs/common';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+
+  const configService = app.get(ConfigService);
+  Logger.debug(configService.get('env'), 'environment');
+  Logger.debug(configService.get('port'), 'port');
+  Logger.debug(configService.get('database'), 'database');
+
+  await app.listen(configService.get('port'));
+}
+
+bootstrap();
+```
+
+Crie o arquivo `.env` na raiz do projeto com os seguintes valores de exemplo:
+
+```
+NODE_ENV=development
+PORT=3000
+
+DATABASE_HOST=localhost
+DATABASE_PORT=5432
+DATABASE_USERNAME=postgres
+DATABASE_PASSWORD=postgres
+DATABASE_NAME=postgres
+
+```
+
+Execute o projeto:
+
+```bash
+npm run start:dev
 ```
 
 ---
@@ -135,4 +262,3 @@ Adotar o Zod para validação de configurações em projetos NestJS trouxe melho
 
 - [Documentação oficial do Zod](https://zod.dev/)
 - [NestJS - Configurações de Ambiente](https://docs.nestjs.com/techniques/configuration)
-
